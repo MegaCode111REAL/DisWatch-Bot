@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 
 const CLIENT_ID = process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const REDIRECT_URI = process.env.REDIRECT_URI || `https://diswatch-bot.onrender/oauth/callback`;
+const REDIRECT_URI = process.env.REDIRECT_URI || `https://diswatch-bot.onrender.com/oauth/callback`;
 
 app.use(express.json());
 app.use(session({
@@ -113,7 +113,7 @@ client.on("guildCreate", async (guild) => {
   console.log(`Joined guild: ${guild.name}`);
 
   try {
-    const response = await fetch(`https://diswatch-bot.onrender/linked-users/${guild.id}`);
+    const response = await fetch(`https://diswatch-bot.onrender.com/linked-users/${guild.id}`);
     const users = await response.json();
 
     for (const user of users) {
