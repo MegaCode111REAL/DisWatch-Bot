@@ -142,3 +142,46 @@ app.listen(PORT, () => {
 });
 
 client.login(process.env.DISCORD_BOT_TOKEN);
+
+// In-memory message storage
+const messages = new Map(); // key: channelId, value: array of messages
+
+// Fetch messages for a channel
+app.get("/messages/:channelId", (req, res) => {
+  const { channelId } = req.params;
+  const msgs = messages.get(channelId) || [];
+  res.json(msgs);
+});
+
+// Send message to a channel
+app.post("/messages/:channelId", (req, res) => {
+  const { channelId } = req.params;
+  const { deviceToken, content } = req.body;
+  if (!deviceToken || !content) return res.status(400).json({ error: "Missing deviceToken or content" });
+
+  // Find linked user by deviceToken
+  const userEntry = [...linkedUsers.entries()].find(([_, info]) => info.deviceId === deviceToken);
+  if (!userEntry) return res.status(401).json({ error: "Device not linked" });
+
+  const [discordId, info] = userEntry;
+
+  const msg = {
+    id: Math.random().toString(36).substring(2),
+    authorName: info.username || "Unknown",
+    authorAvatarURL: "https://cdn-icons-png.flaticon.com/512/147/147144.png",
+    content,
+    isSelf: false
+  };
+
+  if (!messages.has(channelId)) messages.set(channelId, []);
+  messages.get(channelId).push(msg);
+
+  // Optional: Send via bot impersonation
+  const guild = client.guilds.cache.first(); // adjust to find correct guild
+  const channel = guild?.channels.cache.find(c => c.id === channelId && c.isTextBased());
+  if (channel) {
+    impersonate(channel, msg.authorName, msg.content);
+  }
+
+  res.json(msg);
+});
