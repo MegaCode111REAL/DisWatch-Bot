@@ -210,3 +210,25 @@ app.get("/linked-servers", async (req, res) => {
 
   res.json(servers);
 });
+// Debug route to see all pending codes
+app.get("/debug/codes", (req, res) => {
+  const result = [];
+  for (const [userId, code] of pendingCodes.entries()) {
+    const username = client.users.cache.get(userId)?.username || "Unknown";
+    result.push({ discordId: userId, username, code });
+  }
+  res.json(result);
+});
+
+// Debug route to see all linked devices
+app.get("/debug/linked", (req, res) => {
+  const result = [];
+  for (const [discordId, info] of linkedUsers.entries()) {
+    result.push({
+      discordId,
+      username: info.username || client.users.cache.get(discordId)?.username || "Unknown",
+      deviceId: info.deviceId
+    });
+  }
+  res.json(result);
+});
