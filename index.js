@@ -185,3 +185,28 @@ app.post("/messages/:channelId", (req, res) => {
 
   res.json(msg);
 });
+app.get("/linked-servers", async (req, res) => {
+  const deviceToken = req.headers["device-token"];
+  if (!deviceToken) return res.status(400).json({ error: "Missing Device-Token" });
+
+  // Find the linked user
+  const userEntry = [...linkedUsers.entries()].find(([_, info]) => info.deviceId === deviceToken);
+  if (!userEntry) return res.status(404).json({ error: "Device not linked" });
+
+  const [userId] = userEntry;
+
+  // Get the guilds the bot is in
+  const servers = client.guilds.cache.map(guild => ({
+    id: guild.id,
+    name: guild.name,
+    channels: guild.channels.cache
+      .filter(c => c.isTextBased())
+      .map(c => ({
+        id: c.id,
+        name: c.name,
+        messages: [] // messages will be fetched later
+      }))
+  }));
+
+  res.json(servers);
+});
