@@ -1,234 +1,107 @@
 import express from "express";
 import session from "express-session";
 import fetch from "node-fetch";
-import { Client, GatewayIntentBits, Partials, Events, SlashCommandBuilder, Routes, REST } from "discord.js";
+import fs from "fs";
+import { v4 as uuidv4 } from "uuid";
+import { Client, GatewayIntentBits, REST, Routes } from "discord.js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-const app = express();
 const PORT = process.env.PORT || 3000;
-
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const REDIRECT_URI = process.env.REDIRECT_URI || `https://diswatch-bot.onrender.com/oauth/callback`;
-
-app.use(express.json());
-app.use(session({
-  secret: 'supersecretkey',
-  resave: false,
-  saveUninitialized: false
-}));
-
-const linkedUsers = new Map();
-const pendingCodes = new Map();
-const codeToUser = new Map();
+const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.DirectMessages
-  ],
-  partials: [Partials.Channel],
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
 });
 
-async function impersonate(channel, username, text) {
-  try {
-    await channel.send(`**${username}**: ${text}`);
-  } catch (err) {
-    console.error("Error impersonating user:", err);
-  }
+const commands = [
+    { name: "link", description: "Get your Diswatch UUID link code" }
+];
+
+const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+
+(async () => {
+    try {
+        console.log("Registering slash commands...");
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log("Slash commands registered.");
+    } catch (err) {
+        console.error(err);
+    }
+})();
+
+// ===== Backend Setup =====
+const app = express();
+app.use(express.json());
+app.use(session({ secret: "supersecretkey", resave: false, saveUninitialized: false }));
+
+const DB_FILE = "./db.json";
+
+function loadDB() {
+    if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ links: {} }, null, 2));
+    return JSON.parse(fs.readFileSync(DB_FILE));
 }
 
-client.once("ready", async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+function saveDB(db) {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
 
-  const commands = [
-    new SlashCommandBuilder()
-      .setName('link')
-      .setDescription('Get your 6-digit code to link your watch app')
-  ].map(cmd => cmd.toJSON());
+// Watch registers UUID
+app.post("/register", (req, res) => {
+    const { uuid, discordId } = req.body;
+    if (!uuid) return res.status(400).json({ error: "UUID required" });
 
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
+    const db = loadDB();
+    if (discordId) db.links[discordId] = uuid;
+    else if (!db.uuids) db.uuids = db.uuids || [];
+    if (!db.uuids.includes(uuid)) db.uuids.push(uuid);
 
-  try {
-    await rest.put(
-      Routes.applicationCommands(CLIENT_ID),
-      { body: commands }
-    );
-    console.log("Slash commands registered.");
-  } catch (error) {
-    console.error("Failed to register commands:", error);
-  }
+    saveDB(db);
+    res.json({ success: true });
 });
 
-client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName === "link") {
-    const userId = interaction.user.id;
-    const username = interaction.user.username;
-    let code = pendingCodes.get(userId);
-    if (!code) {
-      code = Math.floor(100000 + Math.random() * 900000).toString();
-      pendingCodes.set(userId, code);
-      codeToUser.set(code, userId);
+// Bot requests UUID
+app.get("/get-uuid", (req, res) => {
+    const { discordId } = req.query;
+    if (!discordId) return res.status(400).json({ error: "discordId required" });
+
+    const db = loadDB();
+    let uuid = db.links[discordId];
+    if (!uuid) {
+        uuid = uuidv4();
+        db.links[discordId] = uuid;
+        saveDB(db);
     }
-
-    try {
-      await interaction.user.send(`Your 6-digit Diswatch code: **${code}**\nEnter this in your watch app to link.`);
-      await interaction.reply({ content: 'I sent you a DM with your 6-digit linking code!', ephemeral: true });
-    } catch (err) {
-      console.error("Failed to DM user code:", err);
-      await interaction.reply({ content: 'I could not DM you. Please enable DMs from server members and try again.', ephemeral: true });
-    }
-  }
+    res.json({ uuid });
 });
 
-app.post("/link-device", (req, res) => {
-  const { deviceId, code } = req.body;
-  if (!deviceId || !code) return res.status(400).json({ error: "deviceId and code required" });
+app.listen(PORT, () => console.log(`Backend running on http://localhost:${PORT}`));
 
-  const userId = codeToUser.get(code);
-  if (!userId) return res.status(400).json({ error: "Invalid code" });
+// ===== Bot Commands =====
+client.on("ready", () => console.log(`Bot logged in as ${client.user.tag}`));
 
-  linkedUsers.set(userId, { deviceId, username: null });
-  pendingCodes.delete(userId);
-  codeToUser.delete(code);
+client.on("interactionCreate", async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
 
-  res.json({ status: "linked", userId });
-});
-
-app.get("/linked-users/:guildId", async (req, res) => {
-  const users = [];
-  for (const [discordId, info] of linkedUsers.entries()) {
-    users.push({ discordId, username: info.username || "Unknown" });
-  }
-  res.json(users);
-});
-
-client.on("guildCreate", async (guild) => {
-  console.log(`Joined guild: ${guild.name}`);
-
-  try {
-    const response = await fetch(`https://diswatch-bot.onrender.com/linked-users/${guild.id}`);
-    const users = await response.json();
-
-    for (const user of users) {
-      try {
-        const member = await guild.members.fetch(user.discordId).catch(() => null);
-        if (!member) continue;
-
-        let channel = guild.systemChannel;
-        if (!channel) {
-          channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has("SendMessages"));
+    if (interaction.commandName === "link") {
+        try {
+            const discordId = interaction.user.id;
+            const response = await fetch(`${BACKEND_URL}/get-uuid?discordId=${discordId}`);
+            const data = await response.json();
+            if (data.uuid) await interaction.reply({ content: `🔗 Your Diswatch link code: \`${data.uuid}\``, ephemeral: true });
+            else await interaction.reply({ content: "❌ Could not find or create UUID.", ephemeral: true });
+        } catch (err) {
+            console.error("Error in /link command:", err);
+            await interaction.reply({ content: "⚠️ Error fetching UUID.", ephemeral: true });
         }
-        if (!channel) continue;
-
-        await impersonate(channel, member.displayName, "can now send messages.");
-      } catch (err) {
-        console.error("Error sending impersonated message:", err);
-      }
     }
-  } catch (err) {
-    console.error("Error fetching linked users:", err);
-  }
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
-});
-
-client.login(process.env.DISCORD_BOT_TOKEN);
-
-// In-memory message storage
-const messages = new Map(); // key: channelId, value: array of messages
-
-// Fetch messages for a channel
-app.get("/messages/:channelId", (req, res) => {
-  const { channelId } = req.params;
-  const msgs = messages.get(channelId) || [];
-  res.json(msgs);
-});
-
-// Send message to a channel
-app.post("/messages/:channelId", (req, res) => {
-  const { channelId } = req.params;
-  const { deviceToken, content } = req.body;
-  if (!deviceToken || !content) return res.status(400).json({ error: "Missing deviceToken or content" });
-
-  // Find linked user by deviceToken
-  const userEntry = [...linkedUsers.entries()].find(([_, info]) => info.deviceId === deviceToken);
-  if (!userEntry) return res.status(401).json({ error: "Device not linked" });
-
-  const [discordId, info] = userEntry;
-
-  const msg = {
-    id: Math.random().toString(36).substring(2),
-    authorName: info.username || "Unknown",
-    authorAvatarURL: "https://cdn-icons-png.flaticon.com/512/147/147144.png",
-    content,
-    isSelf: false
-  };
-
-  if (!messages.has(channelId)) messages.set(channelId, []);
-  messages.get(channelId).push(msg);
-
-  // Optional: Send via bot impersonation
-  const guild = client.guilds.cache.first(); // adjust to find correct guild
-  const channel = guild?.channels.cache.find(c => c.id === channelId && c.isTextBased());
-  if (channel) {
-    impersonate(channel, msg.authorName, msg.content);
-  }
-
-  res.json(msg);
-});
-app.get("/linked-servers", async (req, res) => {
-  const deviceToken = req.headers["device-token"];
-  if (!deviceToken) return res.status(400).json({ error: "Missing Device-Token" });
-
-  // Find the linked user
-  const userEntry = [...linkedUsers.entries()].find(([_, info]) => info.deviceId === deviceToken);
-  if (!userEntry) return res.status(404).json({ error: "Device not linked" });
-
-  const [userId] = userEntry;
-
-  // Get the guilds the bot is in
-  const servers = client.guilds.cache.map(guild => ({
-    id: guild.id,
-    name: guild.name,
-    channels: guild.channels.cache
-      .filter(c => c.isTextBased())
-      .map(c => ({
-        id: c.id,
-        name: c.name,
-        messages: [] // messages will be fetched later
-      }))
-  }));
-
-  res.json(servers);
-});
-// Debug route to see all pending codes
-app.get("/debug/codes", (req, res) => {
-  const result = [];
-  for (const [userId, code] of pendingCodes.entries()) {
-    const username = client.users.cache.get(userId)?.username || "Unknown";
-    result.push({ discordId: userId, username, code });
-  }
-  res.json(result);
-});
-
-// Debug route to see all linked devices
-app.get("/debug/linked", (req, res) => {
-  const result = [];
-  for (const [discordId, info] of linkedUsers.entries()) {
-    result.push({
-      discordId,
-      username: info.username || client.users.cache.get(discordId)?.username || "Unknown",
-      deviceId: info.deviceId
-    });
-  }
-  res.json(result);
-});
+client.login(DISCORD_TOKEN);
